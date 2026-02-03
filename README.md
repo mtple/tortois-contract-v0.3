@@ -1,66 +1,72 @@
-## Foundry
+# Tortoise v0.3
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+An ERC1155-based music NFT marketplace smart contract that allows artists to create, price, and sell limited edition songs.
 
-Foundry consists of:
+## Features
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+- **Song Creation**: Artists can create songs with custom pricing, max supply, and metadata
+- **Minting**: Buyers can mint single songs or batch mint multiple songs
+- **Artist Payments**: Automatic payment distribution to artists on mint
+- **Platform Fees**: Configurable platform fee (capped at 1 ETH)
+- **Access Control**: Owner and artist-level permissions for updates
+- **Pausable**: Emergency pause functionality
+- **Token Recovery**: Recover accidentally sent ERC20 tokens
 
-## Documentation
+## Getting Started
 
-https://book.getfoundry.sh/
+### Prerequisites
 
-## Usage
+- [Foundry](https://book.getfoundry.sh/getting-started/installation)
 
-### Build
+### Installation
 
-```shell
-$ forge build
+```bash
+# Clone the repo
+git clone https://github.com/mtple/tortois-contract-v0.3.git
+cd tortois-contract-v0.3
+
+# Install dependencies
+forge install
+
+# Build
+forge build
 ```
 
-### Test
+### Testing
 
-```shell
-$ forge test
+```bash
+forge test
 ```
 
-### Format
+### Deployment
 
-```shell
-$ forge fmt
+1. Copy `.env.example` to `.env` and fill in your values
+2. Deploy:
+
+```bash
+forge script script/Deploy.s.sol --rpc-url <RPC_URL> --broadcast --verify
 ```
 
-### Gas Snapshots
+## Contract Overview
 
-```shell
-$ forge snapshot
-```
+| Function | Description |
+|----------|-------------|
+| `createSong` | Create a new song with title, price, max supply, and metadata URI |
+| `mintSong` | Mint copies of a song (pays artist + platform fee) |
+| `mintBatchSongs` | Mint multiple songs in one transaction |
+| `updateSongPrice` | Update song price (artist or owner only) |
+| `updateSongMetadata` | Update song title and URI (artist or owner only) |
+| `updateArtistAddress` | Transfer song ownership to new artist |
+| `getSongDetails` | Get song information |
+| `getArtistSongs` | Get all song IDs for an artist |
 
-### Anvil
+## Security
 
-```shell
-$ anvil
-```
+- Reentrancy protection on all payment functions
+- Pausable for emergency stops
+- Platform fee capped at 1 ETH
+- Input validation on all public functions
 
-### Deploy
+## License
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+Apache-2.0
