@@ -1,0 +1,12 @@
+# Compiler files
+cache/
+out/
+
+# Broadcast deployment logs (may contain sensitive deployment info)
+broadcast/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
