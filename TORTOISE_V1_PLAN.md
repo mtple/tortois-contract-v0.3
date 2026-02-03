@@ -1,15 +1,15 @@
-# Tortoise Contract v0.4 - Development Plan
+# Tortoise Contract v1 - Development Plan
 
-This document outlines the comprehensive plan for building Tortoise v0.4, a major upgrade that introduces USDC payments, revenue splits, and Base Pay integration.
+This document outlines the comprehensive plan for building Tortoise v1, a major upgrade that introduces USDC payments, revenue splits, and Base Pay integration.
 
 ## Overview of Changes
 
-| Feature | v0.3 | v0.4 |
+| Feature | v0.3 | v1 |
 |---------|------|------|
 | Payment Token | ETH | USDC |
-| Song Price | Variable (ETH) | $1 default (configurable) |
-| Platform Fee | Variable (ETH) | $0.05 (5 cents, configurable) |
-| Artist Revenue | 100% of price | 95 cents ($1 - $0.05 fee) |
+| Song Price | Variable (ETH) | $1 total (configurable, includes platform fee) |
+| Platform Fee | Variable (ETH) | $0.05 included in price (configurable) |
+| Artist Revenue | 100% of price | $0.95 (price minus platform fee), split among contributors |
 | Revenue Splits | None | Configurable per-song |
 | Network | Base | Base |
 | Payment Method | Direct | Direct + Base Pay |
@@ -22,8 +22,8 @@ This document outlines the comprehensive plan for building Tortoise v0.4, a majo
 
 ```bash
 # Create new project directory
-mkdir tortoise-contract-v0.4
-cd tortoise-contract-v0.4
+mkdir tortoise-contract-v1
+cd tortoise-contract-v1
 
 # Initialize pnpm
 pnpm init
@@ -39,8 +39,8 @@ rm src/Counter.sol test/Counter.t.sol script/Counter.s.sol
 
 ```json
 {
-  "name": "tortoise-contract-v0.4",
-  "version": "0.4.0",
+  "name": "tortoise-contract-v1",
+  "version": "1.0.0",
   "description": "ERC1155 Music NFT Marketplace with USDC payments and revenue splits",
   "scripts": {
     "build": "forge build",
@@ -163,8 +163,9 @@ DEPLOYER_PRIVATE_KEY=
 BASESCAN_API_KEY=
 
 # Contract Parameters
-INITIAL_SONG_PRICE=1000000          # $1.00 in USDC (6 decimals)
-INITIAL_PLATFORM_FEE=50000          # $0.05 in USDC (6 decimals)
+INITIAL_SONG_PRICE=950000           # $0.95 in USDC (artist revenue per copy)
+INITIAL_PLATFORM_FEE=50000          # $0.05 in USDC (flat per-transaction fee)
+# Single mint total: $0.95 + $0.05 = $1.00
 
 # Token Addresses
 USDC_BASE_MAINNET=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
@@ -206,22 +207,20 @@ coverage/
 ### 2.1 Project Structure
 
 ```
-tortoise-contract-v0.4/
+tortoise-contract-v1/
 ├── src/
-│   ├── TortoiseV0_4.sol           # Main contract
+│   ├── TortoiseV1.sol           # Main contract
 │   ├── interfaces/
-│   │   ├── ITortoiseV0_4.sol      # Contract interface
-│   │   └── IBasePay.sol           # Base Pay interface
+│   │   └── ITortoiseV1.sol      # Contract interface
 │   └── libraries/
 │       └── SplitLib.sol           # Split calculation library
 ├── test/
-│   ├── TortoiseV0_4.t.sol         # Unit tests
-│   ├── TortoiseV0_4.fuzz.t.sol    # Fuzz tests
-│   ├── TortoiseV0_4.invariant.t.sol # Invariant tests
-│   ├── TortoiseV0_4.integration.t.sol # Integration tests
+│   ├── TortoiseV1.t.sol         # Unit tests
+│   ├── TortoiseV1.fuzz.t.sol    # Fuzz tests
+│   ├── TortoiseV1.invariant.t.sol # Invariant tests
+│   ├── TortoiseV1.integration.t.sol # Integration tests
 │   └── mocks/
-│       ├── MockUSDC.sol           # Mock USDC for testing
-│       └── MockBasePay.sol        # Mock Base Pay for testing
+│       └── MockUSDC.sol           # Mock USDC for testing
 ├── script/
 │   ├── Deploy.s.sol               # Main deployment script
 │   ├── DeployTestnet.s.sol        # Testnet deployment
@@ -264,12 +263,10 @@ struct Song {
 
 /// @notice Configuration for the contract
 struct ContractConfig {
-    uint128 defaultSongPrice;  // Default price for new songs
-    uint128 platformFee;       // Platform fee per mint
+    uint128 defaultSongPrice;  // Default price for new songs (artist revenue per copy)
+    uint128 platformFee;       // Flat platform fee per transaction
     address platformFeeRecipient; // Where platform fees go
     address usdcToken;         // USDC token address
-    address basePay;           // Base Pay contract address (optional)
-    bool basePayEnabled;       // Whether Base Pay is enabled
 }
 ```
 
@@ -279,7 +276,7 @@ struct ContractConfig {
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.30;
 
-interface ITortoiseV0_4 {
+interface ITortoiseV1 {
     // ============ Events ============
 
     event SongCreated(
@@ -314,13 +311,12 @@ interface ITortoiseV0_4 {
 
     event PlatformFeeUpdated(uint128 oldFee, uint128 newFee);
     event DefaultPriceUpdated(uint128 oldPrice, uint128 newPrice);
-    event BasePayStatusUpdated(bool enabled);
 
     // ============ Song Management ============
 
     /// @notice Create a new song
     /// @param title Song title (cannot be empty)
-    /// @param price Price in USDC (0 = use default price)
+    /// @param price Artist revenue per copy in USDC (0 = use default $0.95)
     /// @param maxSupply Maximum supply (0 = unlimited)
     /// @param tokenUri IPFS URI for metadata
     /// @return songId The ID of the created song
@@ -353,18 +349,6 @@ interface ITortoiseV0_4 {
         uint256 songId,
         uint256 quantity,
         address recipient
-    ) external;
-
-    /// @notice Mint songs using Base Pay
-    /// @param songId The song to mint
-    /// @param quantity Number to mint
-    /// @param recipient Address to receive the NFTs
-    /// @param basePayData Encoded Base Pay transaction data
-    function mintSongWithBasePay(
-        uint256 songId,
-        uint256 quantity,
-        address recipient,
-        bytes calldata basePayData
     ) external;
 
     /// @notice Batch mint multiple songs
@@ -401,17 +385,26 @@ interface ITortoiseV0_4 {
 ```
 1. Buyer approves USDC spending for Tortoise contract
 2. Buyer calls mintSong(songId, quantity, recipient)
-3. Contract calculates total: (price * quantity) + platformFee
+3. Contract calculates total: (price * quantity) + platformFee (one flat fee per tx)
 4. Contract transfers USDC from buyer
 5. Contract distributes:
-   - Platform fee → Platform fee recipient
-   - Artist revenue → Split recipients (or artist if no splits)
+   - Platform fee (flat, once per tx) → Platform fee recipient
+   - Artist revenue (price * quantity) → Split recipients (or artist if no splits)
 ```
+
+**Pricing Model:**
+- The song price is the amount the artist receives per copy (default $0.95)
+- The platform fee is a flat per-transaction fee (default $0.05), charged once regardless of quantity
+- Total cost to buyer: (song price * quantity) + platform fee
+- Example: 5 copies at $0.95 + $0.05 fee = $4.80 total
+- The "headline price" shown to users is $1.00 (for single mints: $0.95 + $0.05)
 
 **Implementation Notes:**
 - USDC has 6 decimals (not 18 like ETH)
 - $1.00 = 1_000_000 (1e6 USDC units)
-- $0.05 = 50_000 (5e4 USDC units)
+- $0.95 = 950_000 (default song price / artist revenue per copy)
+- $0.05 = 50_000 (flat platform fee per transaction)
+- Platform fee is charged once per mint transaction, not per copy
 - Use `SafeERC20` for all transfers
 - Check allowance before attempting transfer
 
@@ -421,10 +414,11 @@ interface ITortoiseV0_4 {
 1. Splits are optional - if not configured, 100% goes to artist
 2. Split percentages are in basis points (10000 = 100%)
 3. All splits must sum to exactly 10000 (100%)
-4. Primary artist must be included in splits if configured
-5. Maximum 10 split recipients per song
-6. Splits can be locked permanently by the artist
-7. Only artist can configure/modify splits before locking
+4. Primary artist does NOT need to be included (can assign 100% to collaborators)
+5. Minimum 1% (100 bps) per recipient
+6. Maximum 10 split recipients per song
+7. Splits can be locked permanently by the artist (one-way, irreversible)
+8. Only the song's artist can configure or lock splits
 
 **Split Calculation Library:**
 ```solidity
@@ -434,11 +428,12 @@ pragma solidity 0.8.30;
 library SplitLib {
     uint256 constant BASIS_POINTS = 10_000;
     uint256 constant MAX_SPLITS = 10;
+    uint96 constant MIN_PERCENTAGE = 100; // 1% minimum per recipient
 
     error InvalidSplitTotal();
     error TooManySplits();
     error ZeroAddressRecipient();
-    error ZeroPercentage();
+    error PercentageBelowMinimum();
 
     /// @notice Validate split configuration
     function validateSplits(SplitRecipient[] calldata splits) internal pure {
@@ -447,7 +442,7 @@ library SplitLib {
         uint256 totalPercentage;
         for (uint256 i = 0; i < splits.length; i++) {
             if (splits[i].recipient == address(0)) revert ZeroAddressRecipient();
-            if (splits[i].percentage == 0) revert ZeroPercentage();
+            if (splits[i].percentage < MIN_PERCENTAGE) revert PercentageBelowMinimum();
             totalPercentage += splits[i].percentage;
         }
 
@@ -464,61 +459,46 @@ library SplitLib {
 }
 ```
 
-**Example Splits:**
+**Example Splits (single mint):**
 ```
-Song Price: $1.00 (1_000_000 USDC units)
-Platform Fee: $0.05 (50_000 USDC units)
+Total Buyer Cost: $1.00 (1_000_000 USDC units)
+Platform Fee: $0.05 (50_000 USDC units) - flat per transaction
 Artist Revenue: $0.95 (950_000 USDC units)
 
-Split Configuration:
-- Primary Artist: 70% (7000 bps) → $0.665 (665_000)
+Split Configuration (applied to artist revenue):
+- Artist: 70% (7000 bps) → $0.665 (665_000)
 - Producer: 20% (2000 bps) → $0.19 (190_000)
 - Songwriter: 10% (1000 bps) → $0.095 (95_000)
+
+Note: Primary artist does NOT need to be in the split.
+An artist could assign 100% to collaborators.
 ```
 
-### 3.3 Base Pay Integration
+**Example Splits (5-copy mint):**
+```
+Total Buyer Cost: $4.80 ($0.95 * 5 + $0.05 flat fee)
+Platform Fee: $0.05 (50_000 USDC units) - flat, same regardless of quantity
+Artist Revenue: $4.75 (4_750_000 USDC units)
 
-**What is Base Pay:**
-Base Pay is a payment infrastructure on Base that allows users to pay with various tokens/methods while the merchant receives their preferred token (USDC in our case).
-
-**Integration Approach:**
-```solidity
-interface IBasePay {
-    /// @notice Execute a payment through Base Pay
-    /// @param paymentData Encoded payment instruction
-    /// @return amountReceived Amount of USDC received
-    function executePayment(bytes calldata paymentData) external returns (uint256 amountReceived);
-}
+Split Distribution:
+- Artist: 70% (7000 bps) → $3.325 (3_325_000)
+- Producer: 20% (2000 bps) → $0.95 (950_000)
+- Songwriter: 10% (1000 bps) → $0.475 (475_000)
 ```
 
-**Implementation:**
-```solidity
-function mintSongWithBasePay(
-    uint256 songId,
-    uint256 quantity,
-    address recipient,
-    bytes calldata basePayData
-) external nonReentrant whenNotPaused {
-    require(config.basePayEnabled, "Base Pay not enabled");
-    require(config.basePay != address(0), "Base Pay not configured");
+### 3.3 Base Pay Compatibility
 
-    uint256 requiredAmount = calculateTotalCost(songId, quantity);
+Base Pay is a payment infrastructure on Base that handles token swaps and payment routing at the **frontend/wallet level**. No special contract-level integration is needed.
 
-    // Execute Base Pay - receives USDC
-    uint256 receivedAmount = IBasePay(config.basePay).executePayment(basePayData);
-    require(receivedAmount >= requiredAmount, "Insufficient payment from Base Pay");
+**How it works:**
+1. The frontend uses the Base Pay SDK to initiate a payment
+2. Base Pay handles any token swaps (ETH → USDC, other tokens → USDC, etc.)
+3. The resulting USDC is sent to the user's wallet
+4. The user's wallet approves and calls `mintSong()` with USDC as normal
 
-    // Process mint and distribute payments
-    _processMint(songId, quantity, recipient, requiredAmount);
+**Contract requirements:** None. The standard `mintSong()` function that accepts USDC works with Base Pay out of the box. All Base Pay integration is handled in the frontend code.
 
-    // Refund excess if any (back to buyer via Base Pay refund mechanism)
-    if (receivedAmount > requiredAmount) {
-        IERC20(config.usdcToken).safeTransfer(msg.sender, receivedAmount - requiredAmount);
-    }
-}
-```
-
-**Note:** Base Pay integration details may need to be updated based on the actual Base Pay SDK/API documentation. The interface above is a placeholder that should be refined once Base Pay specifications are confirmed.
+**Frontend reference:** See [Base Pay docs](https://docs.base.org/base-account/guides/accept-payments) for integration details.
 
 ---
 
@@ -537,12 +517,11 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SplitLib} from "./libraries/SplitLib.sol";
-import {IBasePay} from "./interfaces/IBasePay.sol";
 
-/// @title Tortoise v0.4 - Music NFT Marketplace with USDC & Splits
+/// @title Tortoise v1 - Music NFT Marketplace with USDC & Splits
 /// @notice ERC1155-based NFT marketplace for music with USDC payments and revenue splits
 /// @dev Implements configurable pricing, platform fees, and Base Pay integration
-contract TortoiseV0_4 is ERC1155, Ownable, ReentrancyGuard, Pausable {
+contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
     using SplitLib for SplitRecipient[];
 
@@ -551,8 +530,8 @@ contract TortoiseV0_4 is ERC1155, Ownable, ReentrancyGuard, Pausable {
     uint256 public constant MAX_MINT_QUANTITY = 100_000;
     uint256 public constant MAX_BATCH_SIZE = 50;
     uint128 public constant MAX_PLATFORM_FEE = 1_000_000; // $1 max fee
-    uint128 public constant DEFAULT_SONG_PRICE = 1_000_000; // $1
-    uint128 public constant DEFAULT_PLATFORM_FEE = 50_000; // $0.05
+    uint128 public constant DEFAULT_SONG_PRICE = 950_000; // $0.95 (artist revenue per copy)
+    uint128 public constant DEFAULT_PLATFORM_FEE = 50_000; // $0.05 (flat per-transaction fee)
 
     // ============ State ============
 
@@ -581,9 +560,7 @@ contract TortoiseV0_4 is ERC1155, Ownable, ReentrancyGuard, Pausable {
             defaultSongPrice: _defaultSongPrice == 0 ? DEFAULT_SONG_PRICE : _defaultSongPrice,
             platformFee: _platformFee == 0 ? DEFAULT_PLATFORM_FEE : _platformFee,
             platformFeeRecipient: _platformFeeRecipient,
-            usdcToken: _usdcToken,
-            basePay: address(0),
-            basePayEnabled: false
+            usdcToken: _usdcToken
         });
     }
 
@@ -664,38 +641,6 @@ contract TortoiseV0_4 is ERC1155, Ownable, ReentrancyGuard, Pausable {
         _processMint(songId, quantity, recipient, totalCost);
     }
 
-    function mintSongWithBasePay(
-        uint256 songId,
-        uint256 quantity,
-        address recipient,
-        bytes calldata basePayData
-    ) external nonReentrant whenNotPaused {
-        require(config.basePayEnabled, "Base Pay not enabled");
-        require(config.basePay != address(0), "Base Pay not configured");
-
-        uint256 requiredAmount = calculateTotalCost(songId, quantity);
-
-        // Get USDC balance before
-        uint256 balanceBefore = IERC20(config.usdcToken).balanceOf(address(this));
-
-        // Execute Base Pay
-        IBasePay(config.basePay).executePayment(basePayData);
-
-        // Calculate received amount
-        uint256 balanceAfter = IERC20(config.usdcToken).balanceOf(address(this));
-        uint256 receivedAmount = balanceAfter - balanceBefore;
-
-        require(receivedAmount >= requiredAmount, "Insufficient payment");
-
-        // Process mint
-        _processMint(songId, quantity, recipient, requiredAmount);
-
-        // Refund excess
-        if (receivedAmount > requiredAmount) {
-            IERC20(config.usdcToken).safeTransfer(msg.sender, receivedAmount - requiredAmount);
-        }
-    }
-
     // ============ Internal Functions ============
 
     function _processMint(
@@ -730,12 +675,12 @@ contract TortoiseV0_4 is ERC1155, Ownable, ReentrancyGuard, Pausable {
     function _distributePayments(uint256 songId, uint256 totalCost) internal {
         Song storage song = songs[songId];
 
-        // Platform fee
+        // Platform fee (flat, once per transaction)
         uint256 platformFeeAmount = config.platformFee;
         IERC20(config.usdcToken).safeTransfer(config.platformFeeRecipient, platformFeeAmount);
         emit PaymentDistributed(songId, config.platformFeeRecipient, platformFeeAmount, true);
 
-        // Artist revenue (total - platform fee)
+        // Artist revenue = total cost - flat platform fee
         uint256 artistRevenue = totalCost - platformFeeAmount;
 
         SplitRecipient[] storage splits = songSplits[songId];
@@ -757,12 +702,6 @@ contract TortoiseV0_4 is ERC1155, Ownable, ReentrancyGuard, Pausable {
     }
 
     // ============ View Functions ============
-
-    function calculateTotalCost(uint256 songId, uint256 quantity) public view returns (uint256) {
-        Song storage song = songs[songId];
-        require(song.exists, "Song does not exist");
-        return (uint256(song.price) * quantity) + config.platformFee;
-    }
 
     function getSongDetails(uint256 songId) external view returns (Song memory) {
         return songs[songId];
@@ -805,18 +744,20 @@ contract TortoiseV0_4 is ERC1155, Ownable, ReentrancyGuard, Pausable {
         config.platformFeeRecipient = newRecipient;
     }
 
-    function configureBasePay(address basePayAddress, bool enabled) external onlyOwner {
-        config.basePay = basePayAddress;
-        config.basePayEnabled = enabled;
-        emit BasePayStatusUpdated(enabled);
-    }
-
     function pause() external onlyOwner {
         _pause();
     }
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Get total cost for a mint: (price * quantity) + one flat platform fee
+    /// @dev Platform fee is charged once per transaction, not per copy
+    function calculateTotalCost(uint256 songId, uint256 quantity) public view returns (uint256) {
+        Song storage song = songs[songId];
+        require(song.exists, "Song does not exist");
+        return (uint256(song.price) * quantity) + config.platformFee;
     }
 
     /// @notice Recover accidentally sent ERC20 tokens (not USDC unless emergency)
@@ -871,48 +812,21 @@ contract MockUSDC is ERC20 {
 }
 ```
 
-**MockBasePay.sol:**
-```solidity
-// SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.30;
-
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IBasePay} from "../interfaces/IBasePay.sol";
-
-contract MockBasePay is IBasePay {
-    IERC20 public usdc;
-
-    constructor(address _usdc) {
-        usdc = IERC20(_usdc);
-    }
-
-    function executePayment(bytes calldata paymentData) external returns (uint256) {
-        // Decode expected amount from payment data
-        uint256 amount = abi.decode(paymentData, (uint256));
-
-        // Simulate payment by transferring USDC to caller
-        // In tests, MockBasePay should be pre-funded with USDC
-        usdc.transfer(msg.sender, amount);
-
-        return amount;
-    }
-}
-```
 
 ### 5.2 Test Categories
 
-#### Unit Tests (TortoiseV0_4.t.sol)
+#### Unit Tests (TortoiseV1.t.sol)
 
 ```solidity
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
-import {TortoiseV0_4} from "../src/TortoiseV0_4.sol";
+import {TortoiseV1} from "../src/TortoiseV1.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 
-contract TortoiseV0_4Test is Test {
-    TortoiseV0_4 public tortoise;
+contract TortoiseV1Test is Test {
+    TortoiseV1 public tortoise;
     MockUSDC public usdc;
 
     address public owner = makeAddr("owner");
@@ -923,9 +837,10 @@ contract TortoiseV0_4Test is Test {
     address public songwriter = makeAddr("songwriter");
     address public buyer1 = makeAddr("buyer1");
 
-    uint128 constant SONG_PRICE = 1_000_000; // $1
-    uint128 constant PLATFORM_FEE = 50_000;  // $0.05
-    uint128 constant ARTIST_REVENUE = 950_000; // $0.95
+    uint128 constant SONG_PRICE = 950_000;   // $0.95 (artist revenue per copy)
+    uint128 constant PLATFORM_FEE = 50_000;  // $0.05 (flat per-transaction fee)
+    // Single mint total: $0.95 + $0.05 = $1.00
+    // Multi mint total: ($0.95 * qty) + $0.05
 
     function setUp() public {
         // Deploy mock USDC
@@ -933,7 +848,7 @@ contract TortoiseV0_4Test is Test {
 
         // Deploy Tortoise
         vm.startPrank(owner);
-        tortoise = new TortoiseV0_4(
+        tortoise = new TortoiseV1(
             address(usdc),
             platformFeeRecipient,
             PLATFORM_FEE,
@@ -959,7 +874,7 @@ contract TortoiseV0_4Test is Test {
 
         assertEq(songId, 0);
 
-        TortoiseV0_4.Song memory song = tortoise.getSongDetails(0);
+        TortoiseV1.Song memory song = tortoise.getSongDetails(0);
         assertEq(song.title, "My First Song");
         assertEq(song.artist, artist1);
         assertEq(song.price, SONG_PRICE);
@@ -976,8 +891,8 @@ contract TortoiseV0_4Test is Test {
 
         tortoise.createSong("Free Price Song", 0, 100, "ipfs://test");
 
-        TortoiseV0_4.Song memory song = tortoise.getSongDetails(0);
-        assertEq(song.price, SONG_PRICE); // Default price
+        TortoiseV1.Song memory song = tortoise.getSongDetails(0);
+        assertEq(song.price, SONG_PRICE); // Default $0.95
 
         vm.stopPrank();
     }
@@ -1037,7 +952,7 @@ contract TortoiseV0_4Test is Test {
 
         tortoise.lockSplits(0);
 
-        TortoiseV0_4.Song memory song = tortoise.getSongDetails(0);
+        TortoiseV1.Song memory song = tortoise.getSongDetails(0);
         assertTrue(song.splitsLocked);
 
         // Should revert on reconfigure
@@ -1057,7 +972,7 @@ contract TortoiseV0_4Test is Test {
         vm.prank(artist1);
         tortoise.createSong("Mint Test", SONG_PRICE, 100, "ipfs://test");
 
-        // Approve and mint
+        // Approve and mint: $0.95 + $0.05 = $1.00
         uint256 totalCost = SONG_PRICE + PLATFORM_FEE;
 
         vm.startPrank(buyer1);
@@ -1067,8 +982,8 @@ contract TortoiseV0_4Test is Test {
 
         // Verify balances
         assertEq(tortoise.balanceOf(buyer1, 0), 1);
-        assertEq(usdc.balanceOf(platformFeeRecipient), PLATFORM_FEE);
-        assertEq(usdc.balanceOf(artist1), ARTIST_REVENUE);
+        assertEq(usdc.balanceOf(platformFeeRecipient), PLATFORM_FEE); // $0.05
+        assertEq(usdc.balanceOf(artist1), SONG_PRICE);                // $0.95
     }
 
     function test_MintSong_WithSplits() public {
@@ -1077,13 +992,13 @@ contract TortoiseV0_4Test is Test {
         tortoise.createSong("Split Mint", SONG_PRICE, 100, "ipfs://test");
 
         SplitRecipient[] memory splits = new SplitRecipient[](3);
-        splits[0] = SplitRecipient(artist1, 7000);   // 70% = $0.665
-        splits[1] = SplitRecipient(producer, 2000);  // 20% = $0.19
-        splits[2] = SplitRecipient(songwriter, 1000); // 10% = $0.095
+        splits[0] = SplitRecipient(artist1, 7000);   // 70%
+        splits[1] = SplitRecipient(producer, 2000);  // 20%
+        splits[2] = SplitRecipient(songwriter, 1000); // 10%
         tortoise.configureSplits(0, splits);
         vm.stopPrank();
 
-        // Mint
+        // Mint: $0.95 + $0.05 flat fee = $1.00
         uint256 totalCost = SONG_PRICE + PLATFORM_FEE;
 
         vm.startPrank(buyer1);
@@ -1091,11 +1006,11 @@ contract TortoiseV0_4Test is Test {
         tortoise.mintSong(0, 1, buyer1);
         vm.stopPrank();
 
-        // Verify split payments
-        assertEq(usdc.balanceOf(platformFeeRecipient), PLATFORM_FEE);
-        assertEq(usdc.balanceOf(artist1), 665_000);    // 70% of $0.95
-        assertEq(usdc.balanceOf(producer), 190_000);   // 20% of $0.95
-        assertEq(usdc.balanceOf(songwriter), 95_000);  // 10% of $0.95
+        // Verify split payments (splits applied to artist revenue: $0.95)
+        assertEq(usdc.balanceOf(platformFeeRecipient), PLATFORM_FEE); // $0.05
+        assertEq(usdc.balanceOf(artist1), 665_000);    // 70% of 950_000
+        assertEq(usdc.balanceOf(producer), 190_000);   // 20% of 950_000
+        assertEq(usdc.balanceOf(songwriter), 95_000);  // 10% of 950_000
     }
 
     function test_MintSong_MultipleQuantity() public {
@@ -1103,7 +1018,9 @@ contract TortoiseV0_4Test is Test {
         tortoise.createSong("Multi Mint", SONG_PRICE, 100, "ipfs://test");
 
         uint256 quantity = 5;
+        // Platform fee is flat (once per tx), not per copy
         uint256 totalCost = (SONG_PRICE * quantity) + PLATFORM_FEE;
+        // totalCost = ($0.95 * 5) + $0.05 = $4.80
 
         vm.startPrank(buyer1);
         usdc.approve(address(tortoise), totalCost);
@@ -1111,8 +1028,8 @@ contract TortoiseV0_4Test is Test {
         vm.stopPrank();
 
         assertEq(tortoise.balanceOf(buyer1, 0), 5);
-        assertEq(usdc.balanceOf(platformFeeRecipient), PLATFORM_FEE);
-        assertEq(usdc.balanceOf(artist1), SONG_PRICE * quantity - PLATFORM_FEE + ARTIST_REVENUE);
+        assertEq(usdc.balanceOf(platformFeeRecipient), PLATFORM_FEE); // $0.05 flat
+        assertEq(usdc.balanceOf(artist1), SONG_PRICE * quantity);     // $0.95 * 5 = $4.75
     }
 
     function test_MintSong_RevertWhen_InsufficientAllowance() public {
@@ -1135,7 +1052,7 @@ contract TortoiseV0_4Test is Test {
         uint128 newFee = 100_000; // $0.10
         tortoise.updatePlatformFee(newFee);
 
-        TortoiseV0_4.ContractConfig memory cfg = tortoise.getConfig();
+        TortoiseV1.ContractConfig memory cfg = tortoise.getConfig();
         assertEq(cfg.platformFee, newFee);
 
         vm.stopPrank();
@@ -1152,27 +1069,27 @@ contract TortoiseV0_4Test is Test {
 }
 ```
 
-#### Fuzz Tests (TortoiseV0_4.fuzz.t.sol)
+#### Fuzz Tests (TortoiseV1.fuzz.t.sol)
 
 ```solidity
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
-import {TortoiseV0_4, SplitRecipient} from "../src/TortoiseV0_4.sol";
+import {TortoiseV1, SplitRecipient} from "../src/TortoiseV1.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 
-contract TortoiseV0_4FuzzTest is Test {
-    TortoiseV0_4 public tortoise;
+contract TortoiseV1FuzzTest is Test {
+    TortoiseV1 public tortoise;
     MockUSDC public usdc;
 
     function setUp() public {
         usdc = new MockUSDC();
-        tortoise = new TortoiseV0_4(
+        tortoise = new TortoiseV1(
             address(usdc),
             makeAddr("platform"),
             50_000,
-            1_000_000
+            950_000
         );
     }
 
@@ -1182,10 +1099,10 @@ contract TortoiseV0_4FuzzTest is Test {
         vm.prank(makeAddr("artist"));
         tortoise.createSong("Fuzz Song", price, 100, "ipfs://fuzz");
 
-        TortoiseV0_4.Song memory song = tortoise.getSongDetails(0);
+        TortoiseV1.Song memory song = tortoise.getSongDetails(0);
 
         if (price == 0) {
-            assertEq(song.price, 1_000_000); // Default
+            assertEq(song.price, 950_000); // Default ($0.95)
         } else {
             assertEq(song.price, price);
         }
@@ -1198,7 +1115,7 @@ contract TortoiseV0_4FuzzTest is Test {
         address buyer = makeAddr("buyer");
 
         vm.prank(artist);
-        tortoise.createSong("Fuzz Mint", 1_000_000, 0, "ipfs://");
+        tortoise.createSong("Fuzz Mint", 950_000, 0, "ipfs://");
 
         uint256 totalCost = tortoise.calculateTotalCost(0, quantity);
         usdc.mint(buyer, totalCost);
@@ -1216,13 +1133,13 @@ contract TortoiseV0_4FuzzTest is Test {
         uint96 split2,
         uint96 split3
     ) public {
-        vm.assume(split1 > 0 && split2 > 0 && split3 > 0);
+        vm.assume(split1 >= 100 && split2 >= 100 && split3 >= 100); // Min 1% each
         vm.assume(uint256(split1) + split2 + split3 == 10_000);
 
         address artist = makeAddr("artist");
 
         vm.startPrank(artist);
-        tortoise.createSong("Split Fuzz", 1_000_000, 100, "ipfs://");
+        tortoise.createSong("Split Fuzz", 950_000, 100, "ipfs://");
 
         SplitRecipient[] memory splits = new SplitRecipient[](3);
         splits[0] = SplitRecipient(makeAddr("r1"), split1);
@@ -1240,18 +1157,18 @@ contract TortoiseV0_4FuzzTest is Test {
 }
 ```
 
-#### Invariant Tests (TortoiseV0_4.invariant.t.sol)
+#### Invariant Tests (TortoiseV1.invariant.t.sol)
 
 ```solidity
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
-import {TortoiseV0_4, SplitRecipient} from "../src/TortoiseV0_4.sol";
+import {TortoiseV1, SplitRecipient} from "../src/TortoiseV1.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 
-contract TortoiseV0_4InvariantHandler is Test {
-    TortoiseV0_4 public tortoise;
+contract TortoiseV1InvariantHandler is Test {
+    TortoiseV1 public tortoise;
     MockUSDC public usdc;
 
     uint256 public songCount;
@@ -1259,13 +1176,13 @@ contract TortoiseV0_4InvariantHandler is Test {
     uint256 public totalPlatformFees;
     uint256 public totalArtistPayments;
 
-    constructor(TortoiseV0_4 _tortoise, MockUSDC _usdc) {
+    constructor(TortoiseV1 _tortoise, MockUSDC _usdc) {
         tortoise = _tortoise;
         usdc = _usdc;
     }
 
     function createSong(uint128 price, uint128 maxSupply) external {
-        if (price == 0) price = 1_000_000;
+        if (price == 0) price = 950_000;
         if (maxSupply == 0) maxSupply = 1000;
 
         tortoise.createSong(
@@ -1282,7 +1199,7 @@ contract TortoiseV0_4InvariantHandler is Test {
         songId = bound(songId, 0, songCount - 1);
         quantity = bound(quantity, 1, 10);
 
-        TortoiseV0_4.Song memory song = tortoise.getSongDetails(songId);
+        TortoiseV1.Song memory song = tortoise.getSongDetails(songId);
         if (!song.exists) return;
         if (song.maxSupply > 0 && song.currentSupply + quantity > song.maxSupply) return;
 
@@ -1300,27 +1217,27 @@ contract TortoiseV0_4InvariantHandler is Test {
     }
 }
 
-contract TortoiseV0_4InvariantTest is Test {
-    TortoiseV0_4 public tortoise;
+contract TortoiseV1InvariantTest is Test {
+    TortoiseV1 public tortoise;
     MockUSDC public usdc;
-    TortoiseV0_4InvariantHandler public handler;
+    TortoiseV1InvariantHandler public handler;
 
     function setUp() public {
         usdc = new MockUSDC();
-        tortoise = new TortoiseV0_4(
+        tortoise = new TortoiseV1(
             address(usdc),
             makeAddr("platform"),
             50_000,
-            1_000_000
+            950_000
         );
 
-        handler = new TortoiseV0_4InvariantHandler(tortoise, usdc);
+        handler = new TortoiseV1InvariantHandler(tortoise, usdc);
         targetContract(address(handler));
     }
 
     function invariant_SupplyNeverExceedsMax() public view {
         for (uint256 i = 0; i < handler.songCount(); i++) {
-            TortoiseV0_4.Song memory song = tortoise.getSongDetails(i);
+            TortoiseV1.Song memory song = tortoise.getSongDetails(i);
             if (song.exists && song.maxSupply > 0) {
                 assertLe(song.currentSupply, song.maxSupply);
             }
@@ -1341,7 +1258,7 @@ contract TortoiseV0_4InvariantTest is Test {
 }
 ```
 
-#### Integration Tests (TortoiseV0_4.integration.t.sol)
+#### Integration Tests (TortoiseV1.integration.t.sol)
 
 ```solidity
 // Tests against forked Base network with real USDC
@@ -1358,7 +1275,7 @@ pnpm test
 pnpm test:verbose
 
 # Run specific test file
-forge test --match-path test/TortoiseV0_4.t.sol
+forge test --match-path test/TortoiseV1.t.sol
 
 # Run specific test function
 forge test --match-test test_MintSong_WithSplits
@@ -1387,15 +1304,15 @@ pnpm coverage
 pragma solidity 0.8.30;
 
 import {Script, console} from "forge-std/Script.sol";
-import {TortoiseV0_4} from "../src/TortoiseV0_4.sol";
+import {TortoiseV1} from "../src/TortoiseV1.sol";
 
-contract DeployTortoiseV0_4 is Script {
+contract DeployTortoiseV1 is Script {
     // Base Mainnet USDC
     address constant USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     // Base Sepolia USDC
     address constant USDC_BASE_SEPOLIA = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
 
-    function run() public returns (TortoiseV0_4) {
+    function run() public returns (TortoiseV1) {
         uint256 deployerPrivateKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address platformFeeRecipient = vm.envAddress("PLATFORM_FEE_RECIPIENT");
         uint128 platformFee = uint128(vm.envUint("INITIAL_PLATFORM_FEE"));
@@ -1420,14 +1337,14 @@ contract DeployTortoiseV0_4 is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        TortoiseV0_4 tortoise = new TortoiseV0_4(
+        TortoiseV1 tortoise = new TortoiseV1(
             usdcAddress,
             platformFeeRecipient,
             platformFee,
             defaultPrice
         );
 
-        console.log("Tortoise v0.4 deployed at:", address(tortoise));
+        console.log("Tortoise v1 deployed at:", address(tortoise));
 
         vm.stopBroadcast();
 
@@ -1452,9 +1369,9 @@ forge verify-contract \
     0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
     $PLATFORM_FEE_RECIPIENT \
     50000 \
-    1000000) \
+    950000) \
   $CONTRACT_ADDRESS \
-  src/TortoiseV0_4.sol:TortoiseV0_4
+  src/TortoiseV1.sol:TortoiseV1
 ```
 
 ---
@@ -1471,7 +1388,7 @@ forge verify-contract \
 
 4. **USDC Blocklist**: USDC has a blocklist. If platform or artists are blocked, payments will fail.
 
-5. **Base Pay Trust**: Base Pay integration requires trusting the Base Pay contract. Mitigation: Verify received amount.
+5. **Base Pay**: No contract-level risk. Base Pay integration is handled entirely in the frontend.
 
 ### 7.2 Audit Checklist
 
@@ -1491,19 +1408,21 @@ forge verify-contract \
 
 ### 8.1 Key Differences
 
-| Aspect | v0.3 | v0.4 |
+| Aspect | v0.3 | v1 |
 |--------|------|------|
 | Payment | ETH | USDC (ERC20) |
 | User Flow | Send ETH with tx | Approve + Mint |
-| Splits | Not supported | Fully supported |
+| Pricing | Price + fee on top | $1 total (fee included) |
+| Fee Model | Fee per copy | Flat fee per transaction |
+| Splits | Not supported | Configurable per-song |
 | Price Decimals | 18 (wei) | 6 (USDC) |
 | Refunds | Automatic (ETH) | Not needed (exact approve) |
 
 ### 8.2 Migration Notes
 
-1. **No State Migration**: v0.4 is a new deployment with fresh state
+1. **No State Migration**: v1 is a new deployment with fresh state
 2. **NFTs Not Transferable**: Existing v0.3 NFTs remain on v0.3 contract
-3. **Artists Must Re-create**: Songs need to be recreated on v0.4
+3. **Artists Must Re-create**: Songs need to be recreated on v1
 4. **Users Need USDC**: Users must have USDC instead of ETH
 
 ---
@@ -1529,19 +1448,13 @@ forge verify-contract \
 - [ ] Write invariant tests
 - [ ] Test on local fork
 
-### Phase 4: Base Pay Integration (Days 8-9)
-- [ ] Research Base Pay API/SDK
-- [ ] Implement Base Pay interface
-- [ ] Add integration tests
-- [ ] Test with mock Base Pay
-
-### Phase 5: Deployment & Verification (Day 10)
+### Phase 4: Deployment & Verification (Days 8-9)
 - [ ] Deploy to Base Sepolia
 - [ ] Verify contract
 - [ ] Test full flow on testnet
 - [ ] Document deployment
 
-### Phase 6: Audit Prep (Days 11-12)
+### Phase 5: Audit Prep (Days 10-11)
 - [ ] Internal security review
 - [ ] Fix any issues found
 - [ ] Prepare audit documentation
@@ -1574,7 +1487,7 @@ pnpm deploy:base           # Deploy to Base Mainnet
 # Utilities
 forge snapshot             # Create gas snapshot
 forge snapshot --diff      # Compare gas changes
-forge inspect TortoiseV0_4 storage-layout  # View storage
+forge inspect TortoiseV1 storage-layout  # View storage
 cast call $ADDR "getSongDetails(uint256)" 0  # Query contract
 ```
 
@@ -1593,22 +1506,6 @@ cast call $ADDR "getSongDetails(uint256)" 0  # Query contract
 - Decimals: 6
 - Symbol: USDC
 - Name: USD Coin
-
-## Appendix B: Base Pay Research Notes
-
-*Note: This section should be updated with actual Base Pay documentation once available.*
-
-Base Pay is expected to provide:
-1. Payment abstraction layer
-2. Support for multiple payment methods
-3. Settlement in USDC
-
-Integration requirements to research:
-- SDK/API documentation
-- Contract interface
-- Callback mechanisms
-- Fee structure
-- Testing environment
 
 ---
 
