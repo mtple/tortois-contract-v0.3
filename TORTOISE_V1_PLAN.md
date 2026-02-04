@@ -47,8 +47,9 @@ rm src/Counter.sol test/Counter.t.sol script/Counter.s.sol
     "test": "forge test",
     "test:verbose": "forge test -vvv",
     "test:gas": "forge test --gas-report",
-    "test:fuzz": "forge test --match-path 'test/*.fuzz.t.sol'",
-    "test:invariant": "forge test --match-path 'test/*.invariant.t.sol'",
+    "test:fuzz": "forge test --match-path 'test/fuzz/*.t.sol'",
+    "test:invariant": "forge test --match-path 'test/invariant/*.t.sol'",
+    "test:fork": "forge test --match-path 'test/fork/*.t.sol' --fork-url $BASE_RPC_URL",
     "coverage": "forge coverage",
     "snapshot": "forge snapshot",
     "fmt": "forge fmt",
@@ -93,24 +94,25 @@ optimizer = true
 optimizer_runs = 200
 via_ir = false
 evm_version = "cancun"
+dynamic_test_linking = true  # Faster test compilation
+gas_reports = ["TortoiseV1"]
 
-# Testing
-fuzz = { runs = 1000 }
-invariant = { runs = 256, depth = 50 }
+[fuzz]
+runs = 1000
+max_test_rejects = 65536
 
-# Formatting
-line_length = 100
-tab_width = 4
-bracket_spacing = false
-int_types = "long"
-multiline_func_header = "params_first"
-quote_style = "double"
-number_underscore = "thousands"
-single_line_statement_blocks = "multi"
+[invariant]
+runs = 256
+depth = 50
+fail_on_revert = false
+show_metrics = true
 
-[profile.ci]
-fuzz = { runs = 10000 }
-invariant = { runs = 512, depth = 100 }
+[profile.ci.fuzz]
+runs = 10000
+
+[profile.ci.invariant]
+runs = 512
+depth = 100
 
 [rpc_endpoints]
 localhost = "http://127.0.0.1:8545"
@@ -123,6 +125,13 @@ base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api-sepolia.basesca
 
 [fmt]
 line_length = 100
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+multiline_func_header = "params_first"
+quote_style = "double"
+number_underscore = "thousands"
+single_line_statement_blocks = "multi"
 ```
 
 ### 1.5 Remappings (remappings.txt)
@@ -215,10 +224,16 @@ tortoise-contract-v1/
 │   └── libraries/
 │       └── SplitLib.sol           # Split calculation library
 ├── test/
-│   ├── TortoiseV1.t.sol         # Unit tests
-│   ├── TortoiseV1.fuzz.t.sol    # Fuzz tests
-│   ├── TortoiseV1.invariant.t.sol # Invariant tests
-│   ├── TortoiseV1.integration.t.sol # Integration tests
+│   ├── unit/
+│   │   └── TortoiseV1.t.sol      # Unit tests
+│   ├── fuzz/
+│   │   └── TortoiseV1.fuzz.t.sol  # Fuzz tests
+│   ├── invariant/
+│   │   ├── TortoiseV1.invariant.t.sol # Invariant tests
+│   │   └── handlers/
+│   │       └── TortoiseHandler.sol    # Invariant handler
+│   ├── fork/
+│   │   └── TortoiseV1.fork.t.sol  # Fork tests against real Base USDC
 │   └── mocks/
 │       └── MockUSDC.sol           # Mock USDC for testing
 ├── script/
@@ -1562,22 +1577,29 @@ pnpm test
 pnpm test:verbose
 
 # Run specific test file
-forge test --match-path test/TortoiseV1.t.sol
+forge test --match-path test/unit/TortoiseV1.t.sol
 
 # Run specific test function
 forge test --match-test test_MintSong_WithSplits
 
 # Run fuzz tests with more iterations
-forge test --match-path 'test/*.fuzz.t.sol' --fuzz-runs 5000
+forge test --match-path 'test/fuzz/*.t.sol' --fuzz-runs 5000
 
 # Run invariant tests
 pnpm test:invariant
+
+# Run fork tests (requires BASE_RPC_URL)
+pnpm test:fork
 
 # Gas report
 pnpm test:gas
 
 # Coverage report
 pnpm coverage
+
+# Lint for security and style issues
+forge lint
+forge lint --severity high
 ```
 
 ---
