@@ -434,6 +434,7 @@ library SplitLib {
     error TooManySplits();
     error ZeroAddressRecipient();
     error PercentageBelowMinimum();
+    error DuplicateRecipient();
 
     /// @notice Validate split configuration
     function validateSplits(SplitRecipient[] calldata splits) internal pure {
@@ -444,6 +445,11 @@ library SplitLib {
             if (splits[i].recipient == address(0)) revert ZeroAddressRecipient();
             if (splits[i].percentage < MIN_PERCENTAGE) revert PercentageBelowMinimum();
             totalPercentage += splits[i].percentage;
+
+            // H-2 fix: check for duplicate recipients
+            for (uint256 j = i + 1; j < splits.length; j++) {
+                if (splits[i].recipient == splits[j].recipient) revert DuplicateRecipient();
+            }
         }
 
         if (totalPercentage != BASIS_POINTS) revert InvalidSplitTotal();
@@ -544,6 +550,13 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
 
     uint256 public nextSongId;
 
+    // L-1 fix: name/symbol for marketplace compatibility
+    string private constant _name = "Tortoise";
+    string private constant _symbol = "TORT";
+
+    function name() public pure returns (string memory) { return _name; }
+    function symbol() public pure returns (string memory) { return _symbol; }
+
     // ============ Constructor ============
 
     constructor(
@@ -577,10 +590,12 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
 
         songId = nextSongId++;
 
+        uint128 actualPrice = price == 0 ? config.defaultSongPrice : price; // M-4 fix
+
         songs[songId] = Song({
             title: title,
             artist: msg.sender,
-            price: price == 0 ? config.defaultSongPrice : price,
+            price: actualPrice,
             maxSupply: maxSupply,
             currentSupply: 0,
             exists: true,
@@ -590,13 +605,13 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
         tokenUris[songId] = tokenUri;
         artistSongs[msg.sender].push(songId);
 
-        emit SongCreated(songId, title, msg.sender, price, maxSupply);
+        emit SongCreated(songId, title, msg.sender, actualPrice, maxSupply); // M-4 fix: emit stored price
     }
 
     function configureSplits(
         uint256 songId,
         SplitRecipient[] calldata splits
-    ) external {
+    ) external whenNotPaused { // M-3 fix
         Song storage song = songs[songId];
         require(song.exists, "Song does not exist");
         require(msg.sender == song.artist, "Only artist can configure splits");
@@ -615,7 +630,7 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
         emit SplitsConfigured(songId, splits);
     }
 
-    function lockSplits(uint256 songId) external {
+    function lockSplits(uint256 songId) external whenNotPaused { // M-3 fix
         Song storage song = songs[songId];
         require(song.exists, "Song does not exist");
         require(msg.sender == song.artist, "Only artist can lock splits");
@@ -632,23 +647,22 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
         uint256 quantity,
         address recipient
     ) external nonReentrant whenNotPaused {
+        // M-5 fix: validate before pulling USDC
+        _validateMint(songId, quantity);
+
         uint256 totalCost = calculateTotalCost(songId, quantity);
 
-        // Transfer USDC from buyer
+        // Transfer USDC from buyer (Checks done, now Interactions)
         IERC20(config.usdcToken).safeTransferFrom(msg.sender, address(this), totalCost);
 
-        // Process mint and payments
+        // Process mint and payments (Effects + more Interactions)
         _processMint(songId, quantity, recipient, totalCost);
     }
 
     // ============ Internal Functions ============
 
-    function _processMint(
-        uint256 songId,
-        uint256 quantity,
-        address recipient,
-        uint256 totalCost
-    ) internal {
+    /// @dev M-5 fix: separate validation so it can be called before USDC transfer
+    function _validateMint(uint256 songId, uint256 quantity) internal view {
         Song storage song = songs[songId];
         require(song.exists, "Song does not exist");
         require(quantity > 0, "Quantity must be positive");
@@ -657,10 +671,21 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
             song.maxSupply == 0 || song.currentSupply + quantity <= song.maxSupply,
             "Would exceed max supply"
         );
+    }
+
+    function _processMint(
+        uint256 songId,
+        uint256 quantity,
+        address recipient,
+        uint256 totalCost
+    ) internal {
+        Song storage song = songs[songId];
+        // Validation already done in _validateMint (called before USDC transfer)
 
         address actualRecipient = recipient == address(0) ? msg.sender : recipient;
 
-        // Update supply
+        // Update supply (C-2 fix: safe cast check)
+        require(song.currentSupply + quantity <= type(uint128).max, "Supply overflow");
         song.currentSupply += uint128(quantity);
 
         // Mint NFTs
@@ -691,8 +716,16 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
             emit PaymentDistributed(songId, song.artist, artistRevenue, false);
         } else {
             // Distribute according to splits
+            // Last recipient gets remainder to prevent rounding dust (C-1 fix)
+            uint256 distributed = 0;
             for (uint256 i = 0; i < splits.length; i++) {
-                uint256 amount = SplitLib.calculateSplitAmount(artistRevenue, splits[i].percentage);
+                uint256 amount;
+                if (i == splits.length - 1) {
+                    amount = artistRevenue - distributed;
+                } else {
+                    amount = SplitLib.calculateSplitAmount(artistRevenue, splits[i].percentage);
+                }
+                distributed += amount;
                 if (amount > 0) {
                     IERC20(config.usdcToken).safeTransfer(splits[i].recipient, amount);
                     emit PaymentDistributed(songId, splits[i].recipient, amount, false);
@@ -734,6 +767,7 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
     }
 
     function updateDefaultPrice(uint128 newPrice) external onlyOwner {
+        require(newPrice > 0, "Price must be positive"); // M-2 fix
         uint128 oldPrice = config.defaultSongPrice;
         config.defaultSongPrice = newPrice;
         emit DefaultPriceUpdated(oldPrice, newPrice);
@@ -760,8 +794,10 @@ contract TortoiseV1 is ERC1155, Ownable, ReentrancyGuard, Pausable {
         return (uint256(song.price) * quantity) + config.platformFee;
     }
 
-    /// @notice Recover accidentally sent ERC20 tokens (not USDC unless emergency)
-    function recoverTokens(address token, uint256 amount) external onlyOwner {
+    /// @notice Recover accidentally sent ERC20 tokens (cannot recover USDC)
+    /// @dev H-1 fix: block USDC recovery, add nonReentrant (L-3 fix)
+    function recoverTokens(address token, uint256 amount) external onlyOwner nonReentrant {
+        require(token != config.usdcToken, "Cannot recover USDC");
         IERC20(token).safeTransfer(owner(), amount);
     }
 }
@@ -1065,6 +1101,257 @@ contract TortoiseV1Test is Test {
         tortoise.updatePlatformFee(2_000_000); // $2, exceeds $1 max
 
         vm.stopPrank();
+    }
+
+    function test_UpdateDefaultPrice_RevertWhen_Zero() public {
+        vm.prank(owner);
+        vm.expectRevert("Price must be positive");
+        tortoise.updateDefaultPrice(0);
+    }
+
+    // ============ Security Audit Test Cases ============
+
+    // C-1: Split rounding dust must not stay in contract
+    function test_MintSong_SplitRoundingDust_NoLeftover() public {
+        vm.startPrank(artist1);
+        // Use a price that causes rounding: $1.00001 (1_000_001 units)
+        tortoise.createSong("Rounding Test", 1_000_001, 100, "ipfs://test");
+
+        SplitRecipient[] memory splits = new SplitRecipient[](3);
+        splits[0] = SplitRecipient(artist1, 3333);    // 33.33%
+        splits[1] = SplitRecipient(producer, 3333);   // 33.33%
+        splits[2] = SplitRecipient(songwriter, 3334);  // 33.34%
+        tortoise.configureSplits(0, splits);
+        vm.stopPrank();
+
+        uint256 totalCost = tortoise.calculateTotalCost(0, 1);
+        usdc.mint(buyer1, totalCost);
+
+        vm.startPrank(buyer1);
+        usdc.approve(address(tortoise), totalCost);
+        tortoise.mintSong(0, 1, buyer1);
+        vm.stopPrank();
+
+        // Contract must hold zero USDC after distribution
+        assertEq(usdc.balanceOf(address(tortoise)), 0);
+    }
+
+    // H-1: recoverTokens blocks USDC
+    function test_RecoverTokens_RevertWhen_USDC() public {
+        vm.prank(owner);
+        vm.expectRevert("Cannot recover USDC");
+        tortoise.recoverTokens(address(usdc), 1);
+    }
+
+    // H-2: Duplicate split recipients rejected
+    function test_ConfigureSplits_RevertWhen_DuplicateRecipient() public {
+        vm.startPrank(artist1);
+        tortoise.createSong("Dup Test", SONG_PRICE, 100, "ipfs://test");
+
+        SplitRecipient[] memory splits = new SplitRecipient[](2);
+        splits[0] = SplitRecipient(producer, 5000);
+        splits[1] = SplitRecipient(producer, 5000); // duplicate
+
+        vm.expectRevert(SplitLib.DuplicateRecipient.selector);
+        tortoise.configureSplits(0, splits);
+        vm.stopPrank();
+    }
+
+    // Split with percentage below 1% minimum
+    function test_ConfigureSplits_RevertWhen_BelowMinimum() public {
+        vm.startPrank(artist1);
+        tortoise.createSong("Min Test", SONG_PRICE, 100, "ipfs://test");
+
+        SplitRecipient[] memory splits = new SplitRecipient[](2);
+        splits[0] = SplitRecipient(artist1, 9901);
+        splits[1] = SplitRecipient(producer, 99); // 0.99% — below 1% minimum
+
+        vm.expectRevert(SplitLib.PercentageBelowMinimum.selector);
+        tortoise.configureSplits(0, splits);
+        vm.stopPrank();
+    }
+
+    // Splits with exactly 10 recipients (boundary — should succeed)
+    function test_ConfigureSplits_MaxRecipients() public {
+        vm.startPrank(artist1);
+        tortoise.createSong("Max Splits", SONG_PRICE, 100, "ipfs://test");
+
+        SplitRecipient[] memory splits = new SplitRecipient[](10);
+        for (uint256 i = 0; i < 10; i++) {
+            splits[i] = SplitRecipient(makeAddr(string.concat("r", vm.toString(i))), 1000);
+        }
+        tortoise.configureSplits(0, splits); // Should succeed (10 * 1000 = 10000)
+
+        assertEq(tortoise.getSongSplits(0).length, 10);
+        vm.stopPrank();
+    }
+
+    // Splits with 11 recipients (should revert)
+    function test_ConfigureSplits_RevertWhen_TooManySplits() public {
+        vm.startPrank(artist1);
+        tortoise.createSong("Too Many", SONG_PRICE, 100, "ipfs://test");
+
+        SplitRecipient[] memory splits = new SplitRecipient[](11);
+        for (uint256 i = 0; i < 11; i++) {
+            splits[i] = SplitRecipient(makeAddr(string.concat("r", vm.toString(i))), 909);
+        }
+
+        vm.expectRevert(SplitLib.TooManySplits.selector);
+        tortoise.configureSplits(0, splits);
+        vm.stopPrank();
+    }
+
+    // Split recipient is zero address
+    function test_ConfigureSplits_RevertWhen_ZeroAddress() public {
+        vm.startPrank(artist1);
+        tortoise.createSong("Zero Addr", SONG_PRICE, 100, "ipfs://test");
+
+        SplitRecipient[] memory splits = new SplitRecipient[](1);
+        splits[0] = SplitRecipient(address(0), 10000);
+
+        vm.expectRevert(SplitLib.ZeroAddressRecipient.selector);
+        tortoise.configureSplits(0, splits);
+        vm.stopPrank();
+    }
+
+    // lockSplits by non-artist reverts
+    function test_LockSplits_RevertWhen_NotArtist() public {
+        vm.prank(artist1);
+        tortoise.createSong("Lock Auth", SONG_PRICE, 100, "ipfs://test");
+
+        vm.prank(artist2);
+        vm.expectRevert("Only artist can lock splits");
+        tortoise.lockSplits(0);
+    }
+
+    // lockSplits on already locked song reverts
+    function test_LockSplits_RevertWhen_AlreadyLocked() public {
+        vm.startPrank(artist1);
+        tortoise.createSong("Double Lock", SONG_PRICE, 100, "ipfs://test");
+        tortoise.lockSplits(0);
+
+        vm.expectRevert("Already locked");
+        tortoise.lockSplits(0);
+        vm.stopPrank();
+    }
+
+    // Minting with price = 0 (free song, only platform fee)
+    function test_MintSong_FreeSong_PlatformFeeOnly() public {
+        vm.prank(artist1);
+        tortoise.createSong("Free Song", 1, 100, "ipfs://test"); // 1 unit = $0.000001
+
+        uint256 totalCost = tortoise.calculateTotalCost(0, 1);
+        assertEq(totalCost, 1 + PLATFORM_FEE); // price(1) + fee
+
+        usdc.mint(buyer1, totalCost);
+        vm.startPrank(buyer1);
+        usdc.approve(address(tortoise), totalCost);
+        tortoise.mintSong(0, 1, buyer1);
+        vm.stopPrank();
+
+        assertEq(tortoise.balanceOf(buyer1, 0), 1);
+    }
+
+    // Minting with platformFee = 0 (admin set fee to zero)
+    function test_MintSong_ZeroPlatformFee() public {
+        vm.prank(owner);
+        tortoise.updatePlatformFee(0);
+
+        vm.prank(artist1);
+        tortoise.createSong("No Fee", SONG_PRICE, 100, "ipfs://test");
+
+        uint256 totalCost = tortoise.calculateTotalCost(0, 1);
+        assertEq(totalCost, SONG_PRICE); // No fee
+
+        usdc.mint(buyer1, totalCost);
+        vm.startPrank(buyer1);
+        usdc.approve(address(tortoise), totalCost);
+        tortoise.mintSong(0, 1, buyer1);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(artist1), SONG_PRICE);
+        assertEq(usdc.balanceOf(platformFeeRecipient), 0);
+    }
+
+    // Unlimited supply song (maxSupply = 0)
+    function test_MintSong_UnlimitedSupply() public {
+        vm.prank(artist1);
+        tortoise.createSong("Unlimited", SONG_PRICE, 0, "ipfs://test"); // 0 = unlimited
+
+        uint256 qty = 1000;
+        uint256 totalCost = tortoise.calculateTotalCost(0, qty);
+        usdc.mint(buyer1, totalCost);
+
+        vm.startPrank(buyer1);
+        usdc.approve(address(tortoise), totalCost);
+        tortoise.mintSong(0, qty, buyer1);
+        vm.stopPrank();
+
+        assertEq(tortoise.balanceOf(buyer1, 0), qty);
+    }
+
+    // M-4: createSong with price=0 emits default price, not zero
+    function test_CreateSong_EmitsActualPrice() public {
+        vm.startPrank(artist1);
+
+        vm.expectEmit(true, true, true, true);
+        emit SongCreated(0, "Default Price", artist1, SONG_PRICE, 100); // Should be SONG_PRICE, not 0
+
+        tortoise.createSong("Default Price", 0, 100, "ipfs://test");
+        vm.stopPrank();
+    }
+
+    // M-3: configureSplits reverts when paused
+    function test_ConfigureSplits_RevertWhen_Paused() public {
+        vm.prank(artist1);
+        tortoise.createSong("Pause Test", SONG_PRICE, 100, "ipfs://test");
+
+        vm.prank(owner);
+        tortoise.pause();
+
+        SplitRecipient[] memory splits = new SplitRecipient[](1);
+        splits[0] = SplitRecipient(artist1, 10000);
+
+        vm.prank(artist1);
+        vm.expectRevert();
+        tortoise.configureSplits(0, splits);
+    }
+
+    // M-3: lockSplits reverts when paused
+    function test_LockSplits_RevertWhen_Paused() public {
+        vm.prank(artist1);
+        tortoise.createSong("Pause Lock", SONG_PRICE, 100, "ipfs://test");
+
+        vm.prank(owner);
+        tortoise.pause();
+
+        vm.prank(artist1);
+        vm.expectRevert();
+        tortoise.lockSplits(0);
+    }
+
+    // Artist can assign 100% to collaborators (not in split at all)
+    function test_MintSong_SplitsWithoutArtist() public {
+        vm.startPrank(artist1);
+        tortoise.createSong("No Artist Split", SONG_PRICE, 100, "ipfs://test");
+
+        SplitRecipient[] memory splits = new SplitRecipient[](2);
+        splits[0] = SplitRecipient(producer, 6000);   // 60%
+        splits[1] = SplitRecipient(songwriter, 4000);  // 40%
+        tortoise.configureSplits(0, splits);
+        vm.stopPrank();
+
+        uint256 totalCost = SONG_PRICE + PLATFORM_FEE;
+        usdc.mint(buyer1, totalCost);
+
+        vm.startPrank(buyer1);
+        usdc.approve(address(tortoise), totalCost);
+        tortoise.mintSong(0, 1, buyer1);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(artist1), 0);         // Artist gets nothing
+        assertEq(usdc.balanceOf(producer), 570_000);   // 60% of 950_000
+        assertEq(usdc.balanceOf(songwriter), 380_000); // 40% of 950_000
     }
 }
 ```
@@ -1376,22 +1663,236 @@ forge verify-contract \
 
 ---
 
-## 7. Security Considerations
+## 7. Security Audit Findings
 
-### 7.1 Known Risks
+The following issues were identified during a deep security review of the planned contract code. Each finding includes the required fix.
 
-1. **USDC Approval Front-running**: Users must approve USDC spending. Mitigation: Use `increaseAllowance` pattern in frontend.
+### 7.1 CRITICAL — Will Lose Funds
 
-2. **Split Rounding**: Small amounts with many splits may result in rounding losses. Mitigation: Last recipient receives remainder.
+#### C-1: Split rounding dust stuck in contract forever
 
-3. **Reentrancy**: ERC20 transfers could be exploited. Mitigation: Use ReentrancyGuard on all external functions.
+**Location:** `_distributePayments` split loop
 
-4. **USDC Blocklist**: USDC has a blocklist. If platform or artists are blocked, payments will fail.
+**Issue:** `calculateSplitAmount` uses integer division: `(totalAmount * percentage) / BASIS_POINTS`. The divided amounts do not always sum to `artistRevenue`. The remainder (dust) stays in the contract with no way to recover it (accumulates over every mint with splits).
 
-5. **Base Pay**: No contract-level risk. Base Pay integration is handled entirely in the frontend.
+**Example:**
+```
+artistRevenue = 1_000_001 (custom-priced song)
+Splits: 33.33% / 33.33% / 33.34%
 
-### 7.2 Audit Checklist
+Recipient 1: 1_000_001 * 3333 / 10000 = 333_300
+Recipient 2: 1_000_001 * 3333 / 10000 = 333_300
+Recipient 3: 1_000_001 * 3334 / 10000 = 333_400
+Total distributed: 1_000_000
+Lost: 1 USDC unit per mint
+```
 
+**Note:** The plan's security section claims "last recipient receives remainder" but the code does not implement this. The `invariant_ContractHasNoLeftoverUSDC` test would catch this — meaning the implementation as written would fail its own invariant.
+
+**Fix:** Last recipient must receive the remainder instead of the calculated amount:
+```solidity
+// In _distributePayments, replace the split loop with:
+uint256 distributed = 0;
+for (uint256 i = 0; i < splits.length; i++) {
+    uint256 amount;
+    if (i == splits.length - 1) {
+        // Last recipient gets the remainder to avoid rounding dust
+        amount = artistRevenue - distributed;
+    } else {
+        amount = SplitLib.calculateSplitAmount(artistRevenue, splits[i].percentage);
+    }
+    distributed += amount;
+    if (amount > 0) {
+        IERC20(config.usdcToken).safeTransfer(splits[i].recipient, amount);
+        emit PaymentDistributed(songId, splits[i].recipient, amount, false);
+    }
+}
+```
+
+---
+
+#### C-2: `currentSupply` unsafe downcast truncation
+
+**Location:** `_processMint`: `song.currentSupply += uint128(quantity);`
+
+**Issue:** `quantity` is `uint256`, validated only as `<= MAX_MINT_QUANTITY` (100,000). The explicit cast `uint128(quantity)` bypasses Solidity 0.8's checked arithmetic. While practically impossible to overflow `uint128` at 100k per call, the missing check is a code quality issue and could become exploitable if `MAX_MINT_QUANTITY` is raised.
+
+**Fix:** Add explicit check:
+```solidity
+require(song.currentSupply + quantity <= type(uint128).max, "Supply overflow");
+song.currentSupply += uint128(quantity);
+```
+
+---
+
+### 7.2 HIGH — Potential Fund Loss or Broken Invariants
+
+#### H-1: `recoverTokens` can drain USDC
+
+**Location:** `recoverTokens`
+
+**Issue:** No restriction on token address. Owner can call `recoverTokens(config.usdcToken, amount)` to drain any USDC held by the contract (rounding dust, or mid-transaction if future changes introduce intermediate balances). v0.3 had balance checks and validation; v1 has neither.
+
+**Fix:** Either block USDC recovery or gate it behind a timelock:
+```solidity
+function recoverTokens(address token, uint256 amount) external onlyOwner nonReentrant {
+    require(token != config.usdcToken, "Cannot recover USDC");
+    IERC20(token).safeTransfer(owner(), amount);
+}
+```
+Add a separate `emergencyWithdrawUSDC()` function with a timelock or multisig requirement if emergency recovery is needed.
+
+Also: add `nonReentrant` modifier (missing from v1 plan, present in v0.3).
+
+---
+
+#### H-2: No duplicate recipient check in splits
+
+**Location:** `SplitLib.validateSplits`
+
+**Issue:** An artist can set the same address multiple times in splits. This wastes gas (multiple USDC transfers to the same address) and confuses off-chain indexers. More importantly, if the rounding remainder fix (C-1) gives the "last" recipient the dust, a malicious split ordering could game who receives remainders.
+
+**Fix:** Add duplicate check in `validateSplits`:
+```solidity
+// After the percentage checks:
+for (uint256 i = 0; i < splits.length; i++) {
+    for (uint256 j = i + 1; j < splits.length; j++) {
+        if (splits[i].recipient == splits[j].recipient) revert DuplicateRecipient();
+    }
+}
+```
+
+---
+
+#### H-3: `mintBatchSongs` declared in interface but not implemented
+
+**Location:** Interface `ITortoiseV1` line 358-362
+
+**Issue:** The interface declares `mintBatchSongs` but the contract skeleton has no implementation. Any contract claiming to implement this interface would fail. If batch minting is intended, it needs implementation with:
+- Single flat platform fee for the entire batch
+- ReentrancyGuard
+- Proper loop bounds and gas limit handling
+- Split distribution per song
+
+**Fix:** Either implement the function or remove it from the interface. If implementing, follow v0.3's batch pattern but adapted for USDC and splits.
+
+---
+
+### 7.3 MEDIUM — Design Concerns
+
+#### M-1: Owner can set platform fee to consume most of song price
+
+**Issue:** `updatePlatformFee` caps at `MAX_PLATFORM_FEE = $1.00`. But a song priced at $0.95 with a $0.95 platform fee means the artist gets $0.00 per single mint. The math doesn't break (`artistRevenue = ($0.95 * 1) + $0.95 - $0.95 = $0.95`... wait, no: `totalCost = (price * qty) + platformFee`, so `artistRevenue = totalCost - platformFee = price * qty`). The artist revenue is actually always `price * quantity` regardless of platform fee.
+
+Correction: On re-examination, this is not actually an issue. `totalCost = (price * qty) + platformFee`, and `artistRevenue = totalCost - platformFee = price * qty`. The platform fee cannot eat into artist revenue — it's additive. However, a high platform fee does make songs more expensive for buyers, which could hurt artists indirectly.
+
+**Action:** Document this as a known trust assumption. No code fix needed.
+
+---
+
+#### M-2: `updateDefaultPrice` has no lower bound
+
+**Location:** `updateDefaultPrice`
+
+**Issue:** Owner can set `defaultSongPrice` to 0. Artists creating songs without a custom price would get $0 per copy (only platform fee collected).
+
+**Fix:**
+```solidity
+function updateDefaultPrice(uint128 newPrice) external onlyOwner {
+    require(newPrice > 0, "Price must be positive");
+    uint128 oldPrice = config.defaultSongPrice;
+    config.defaultSongPrice = newPrice;
+    emit DefaultPriceUpdated(oldPrice, newPrice);
+}
+```
+
+---
+
+#### M-3: No `whenNotPaused` on `configureSplits` and `lockSplits`
+
+**Issue:** During an emergency pause (e.g., exploit detected), artists can still change or lock splits. If the pause is due to a split-related vulnerability, the owner cannot prevent split modifications.
+
+**Fix:** Add `whenNotPaused` modifier to both `configureSplits` and `lockSplits`. Or document this as intentional (artists always retain split control).
+
+---
+
+#### M-4: `createSong` emits wrong price when using default
+
+**Location:** `createSong` event emission
+
+**Issue:** When `price == 0`, the song is stored with `config.defaultSongPrice` but the event emits the input parameter (0). Off-chain indexers record the wrong price.
+
+**Fix:**
+```solidity
+// Change the emit to use the stored price:
+uint128 actualPrice = price == 0 ? config.defaultSongPrice : price;
+songs[songId] = Song({ ..., price: actualPrice, ... });
+emit SongCreated(songId, title, msg.sender, actualPrice, maxSupply);
+```
+
+---
+
+#### M-5: CEI pattern violated — USDC pulled before validation
+
+**Location:** `mintSong`
+
+**Issue:** `safeTransferFrom` (line 638) executes before `_processMint` validates the song exists and quantity is valid. If validation fails, the tx reverts and no funds are lost, but the buyer wastes gas.
+
+**Fix:** Extract validation from `_processMint` and call it before the USDC transfer:
+```solidity
+function mintSong(uint256 songId, uint256 quantity, address recipient)
+    external nonReentrant whenNotPaused
+{
+    _validateMint(songId, quantity); // Checks first
+    uint256 totalCost = calculateTotalCost(songId, quantity);
+    IERC20(config.usdcToken).safeTransferFrom(msg.sender, address(this), totalCost);
+    _processMint(songId, quantity, recipient, totalCost); // Effects + Interactions
+}
+```
+
+---
+
+### 7.4 LOW — Minor Issues
+
+#### L-1: Missing `name()` and `symbol()` functions
+
+v0.3 returned "Tortoise" / "TORT". Some marketplaces and indexers expect these on ERC1155 contracts. Add them.
+
+---
+
+#### L-2: `artistSongs` mapping is append-only, no song transfer
+
+v0.3 had `updateArtistAddress` and `_removeSongFromArtist`. v1 has neither. An artist can never transfer song ownership. If intentional, document it.
+
+---
+
+#### L-3: `recoverTokens` missing `nonReentrant`
+
+v0.3 had `nonReentrant` on `recoverTokens`. v1 doesn't. Since `safeTransfer` could call into a malicious token contract's callback, reentrancy protection should be present.
+
+---
+
+#### L-4: `SplitRecipient[]` in events is hard to index
+
+`event SplitsConfigured(uint256 indexed songId, SplitRecipient[] splits)` — dynamic struct arrays in events are ABI-encoded, making them harder to decode for some off-chain tools. Consider emitting individual events per recipient, or a hash of the splits config.
+
+---
+
+### 7.5 Updated Audit Checklist
+
+- [ ] **C-1**: Split rounding dust — last recipient gets remainder
+- [ ] **C-2**: Safe uint128 cast on currentSupply
+- [ ] **H-1**: Block USDC in recoverTokens, add nonReentrant
+- [ ] **H-2**: Duplicate split recipient check
+- [ ] **H-3**: Implement or remove mintBatchSongs
+- [ ] **M-2**: Minimum default price validation
+- [ ] **M-3**: Decide on whenNotPaused for split functions
+- [ ] **M-4**: Emit actual stored price in createSong
+- [ ] **M-5**: Validate before USDC transfer
+- [ ] **L-1**: Add name() and symbol()
+- [ ] **L-2**: Decide on song ownership transfer
+- [ ] **L-3**: Add nonReentrant to recoverTokens
+- [ ] **L-4**: Consider split event design
 - [ ] All external calls use ReentrancyGuard
 - [ ] CEI pattern followed in all functions
 - [ ] Input validation on all parameters
